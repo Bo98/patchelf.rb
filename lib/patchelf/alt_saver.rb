@@ -585,6 +585,10 @@ module PatchELF
 
     def replace_sections_in_the_way_of_phdr!
       num_notes = @sections.count { |sec| sec.type == ELFTools::Constants::SHT_NOTE }
+      populated_note_segments do |_phdr|
+        # We can reuse the segment for the first note of each segment
+        num_notes -= 1 if num_notes > 0
+      end
       pht_size = ehdr.num_bytes + ((@segments.count + num_notes + 1) * @segments.first.header.num_bytes)
 
       # replace sections that may overlap with expanded program header table
@@ -644,6 +648,17 @@ module PatchELF
       rewrite_headers(first_page + ehdr.e_phoff)
     end
 
+    def populated_note_segments
+      phdrs_by_type(ELFTools::Constants::PT_NOTE) do |phdr|
+        # Binaries produced by older patchelf versions may contain empty PT_NOTE segments.
+        next if @sections.none? do |sec|
+          sec.header.sh_offset >= phdr.p_offset && sec.header.sh_offset < phdr.p_offset + phdr.p_filesz
+        end
+
+        yield phdr
+      end
+    end
+
     def normalize_note_segments
       return if @replaced_sections.none? do |rsec_name, _|
         find_section(rsec_name)&.type == ELFTools::Constants::SHT_NOTE
@@ -651,12 +666,7 @@ module PatchELF
 
       new_phdrs = []
 
-      phdrs_by_type(ELFTools::Constants::PT_NOTE) do |phdr|
-        # Binaries produced by older patchelf versions may contain empty PT_NOTE segments.
-        next if @sections.none? do |sec|
-          sec.header.sh_offset >= phdr.p_offset && sec.header.sh_offset < phdr.p_offset + phdr.p_filesz
-        end
-
+      populated_note_segments do |phdr|
         new_phdrs += normalize_note_segment(phdr)
       end
 
@@ -667,6 +677,7 @@ module PatchELF
       start_off = phdr.p_offset.to_i
       curr_off = start_off
       end_off = start_off + phdr.p_filesz
+      first_section = true
 
       new_phdrs = []
 
@@ -693,7 +704,8 @@ module PatchELF
         new_phdr.p_filesz = size
         new_phdr.p_memsz = size
 
-        if curr_off == start_off
+        if first_section
+          first_section = false
           phdr.assign(new_phdr)
         else
           new_phdrs << new_phdr
